@@ -8,7 +8,7 @@ from gavrptw.core import run_gavrptw
 def main():
     '''main()'''
 
-    instance_name = 'C101'
+    instance_name = 'R108'
     disposal_sites = [10, 50, 15, 55, 82, 97]
 
     unit_cost = 8.0

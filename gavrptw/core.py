@@ -5,7 +5,7 @@ import math
 import time
 import random
 import copy
-
+import matplotlib.pyplot as plt
 # ================= COST =================
 def route_distance(route, dist):
     total, last = 0, 0
@@ -16,6 +16,146 @@ def route_distance(route, dist):
     total += dist[last][0]
     return total
 
+
+# ================= ROUTE TIME =================
+def route_time(route, instance, dist):
+    time_now, last = 0, 0
+
+    for node in route:
+        nid = int(node.split('_')[1]) if isinstance(node, str) else node
+        data = instance[f'customer_{nid}']
+
+        time_now += dist[last][nid]
+
+        if time_now < data['ready_time']:
+            time_now = data['ready_time']
+
+        service = 30 if isinstance(node, str) else data['service_time']
+        time_now += service
+
+        last = nid
+
+    time_now += dist[last][0]
+    return time_now
+
+
+# ================= SHAPE METRIC =================
+def shape_metric(routes, instance):
+    total = 0
+
+    for route in routes:
+        xs, ys = [], []
+
+        for node in route:
+            if isinstance(node, str):
+                continue
+            data = instance[f'customer_{node}']
+            xs.append(data['coordinates']['x'])
+            ys.append(data['coordinates']['y'])
+
+        if not xs:
+            continue
+
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
+
+        for node in route:
+            if isinstance(node, str):
+                continue
+            data = instance[f'customer_{node}']
+            dx = data['coordinates']['x'] - cx
+            dy = data['coordinates']['y'] - cy
+            total += math.sqrt(dx*dx + dy*dy)
+
+    return total
+
+
+# ================= OVERLAP (SIMPLE) =================
+def overlap_simple(routes, instance):
+    boxes = []
+
+    for route in routes:
+        xs, ys = [], []
+
+        for node in route:
+            if isinstance(node, str):
+                continue
+            data = instance[f'customer_{node}']
+            xs.append(data['coordinates']['x'])
+            ys.append(data['coordinates']['y'])
+
+        if xs:
+            boxes.append((min(xs), max(xs), min(ys), max(ys)))
+
+    count = 0
+    for i in range(len(boxes)):
+        for j in range(i+1, len(boxes)):
+            a = boxes[i]
+            b = boxes[j]
+
+            if (a[0] <= b[1] and a[1] >= b[0] and
+                a[2] <= b[3] and a[3] >= b[2]):
+                count += 1
+
+    return count
+# ================= PLOT ROUTES =================
+def plot_routes(routes, instance, disposal_sites):
+    import matplotlib.pyplot as plt
+
+    depot = instance['depart']['coordinates']
+
+    plt.figure(figsize=(8, 8))
+
+    # ===== DEPOT =====
+    plt.scatter(depot['x'], depot['y'], marker='s', s=100, label='Depot')
+
+    # ===== DISPOSAL SITES =====
+    # ===== DISPOSAL SITES =====
+    first = True
+    for ds in disposal_sites:
+        data = instance[f'customer_{ds}']
+        plt.scatter(
+            data['coordinates']['x'],
+            data['coordinates']['y'],
+            marker='x',
+            s=80,
+            color='red',
+            label='Disposal' if first else None
+        )
+        first = False
+
+    # ===== LEGEND =====
+    plt.legend()
+
+    # ===== ROUTES =====
+    for idx, route in enumerate(routes):
+        x = [depot['x']]
+        y = [depot['y']]
+
+        for node in route:
+            if isinstance(node, str):
+                nid = int(node.split('_')[1])
+                data = instance[f'customer_{nid}']
+            else:
+                data = instance[f'customer_{node}']
+
+            x.append(data['coordinates']['x'])
+            y.append(data['coordinates']['y'])
+
+        x.append(depot['x'])
+        y.append(depot['y'])
+
+        plt.plot(x, y, marker='o', label=f'Vehicle {idx+1}')
+
+    plt.title("Vehicle Routes with Disposal Sites")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+
+    if len(routes) <= 10:
+        plt.legend()
+
+    plt.grid()
+    plt.show()
 
 # ================= FEASIBLE =================
 def feasible(route, instance, dist, capacity):
@@ -270,7 +410,6 @@ def simulated_annealing(routes, instance, dist, capacity, disposal_sites):
     def total_cost(rts):
         return sum(route_distance(r, dist) for r in rts)
 
-    # ⚠️ copy để tránh reference
     current = copy.deepcopy(routes)
     best = copy.deepcopy(routes)
 
@@ -283,12 +422,10 @@ def simulated_annealing(routes, instance, dist, capacity, disposal_sites):
 
         delta = new_cost - current_cost
 
-        # ===== ACCEPT =====
         if delta < 0 or random.random() < math.exp(-delta / T):
             current = new
             current_cost = new_cost
 
-        # ===== UPDATE BEST =====
         if current_cost < best_cost:
             best = copy.deepcopy(current)
             best_cost = current_cost
@@ -329,10 +466,9 @@ def run_gavrptw(instance_name, disposal_sites, unit_cost, init_cost, wait_cost, 
     for _ in range(10):
         routes = vehicle_reduction(routes, instance, dist, capacity)
 
-    # Ruin & Recreate + SA
     routes = simulated_annealing(routes, instance, dist, capacity, disposal_sites)
 
-    # OUTPUT
+    # ===== OUTPUT ROUTES =====
     total = 0
     print("\n" + "="*100)
     print(f"{'XE':<5} | {'QUÃNG ĐƯỜNG':<12} | TUYẾN")
@@ -347,6 +483,25 @@ def run_gavrptw(instance_name, disposal_sites, unit_cost, init_cost, wait_cost, 
     print(f"TỔNG: {len(routes)} xe | Total distance = {total:.2f}")
     print("="*100)
 
-    print("Time:", round(time.time()-start,2), "s")
+    # ===== METRICS =====
+    CT = round(time.time() - start, 2)
+
+    route_times = [route_time(r, instance, dist) for r in routes]
+    RTD = max(route_times) - min(route_times) if route_times else 0
+
+    Sm = shape_metric(routes, instance)
+    Nh = overlap_simple(routes, instance)
+
+    print("\nKẾT QUẢ (Table 3 metrics)")
+    print("-"*100)
+    print(f"Số xe (Vn): {len(routes)}")
+    print(f"Tổng quãng đường (TD): {total:.2f}")
+    print(f"Shape metric (Sm): {Sm:.2f}")
+    print(f"Overlap (Nh): {Nh}")
+    print(f"Route time deviation (RTD): {RTD:.2f}")
+    print(f"Computation time (CT): {CT} s")
+    print("="*100)
+    
+    plot_routes(routes, instance, disposal_sites)
 
     return routes
