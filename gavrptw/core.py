@@ -6,186 +6,159 @@ import time
 import random
 import copy
 import matplotlib.pyplot as plt
-# ================= COST =================
-def route_distance(route, dist):
-    total, last = 0, 0
-    for node in route:
-        nid = int(node.split('_')[1]) if isinstance(node, str) else node
-        total += dist[last][nid]
-        last = nid
-    total += dist[last][0]
-    return total
+
+# ================= NODE =================
+def is_ds(node):
+    return isinstance(node, str) and node.startswith("DS")
+
+def is_lunch(node):
+    return node == "LUNCH"
+
+def get_id(node):
+    return int(node.split('_')[1]) if isinstance(node, str) else node
 
 
-# ================= ROUTE TIME =================
-def route_time(route, instance, dist):
-    time_now, last = 0, 0
-
-    for node in route:
-        nid = int(node.split('_')[1]) if isinstance(node, str) else node
-        data = instance[f'customer_{nid}']
-
-        time_now += dist[last][nid]
-
-        if time_now < data['ready_time']:
-            time_now = data['ready_time']
-
-        service = 30 if isinstance(node, str) else data['service_time']
-        time_now += service
-
-        last = nid
-
-    time_now += dist[last][0]
-    return time_now
-
-
-# ================= SHAPE METRIC =================
-def shape_metric(routes, instance):
-    total = 0
-
-    for route in routes:
-        xs, ys = [], []
-
-        for node in route:
-            if isinstance(node, str):
-                continue
-            data = instance[f'customer_{node}']
-            xs.append(data['coordinates']['x'])
-            ys.append(data['coordinates']['y'])
-
-        if not xs:
-            continue
-
-        cx = sum(xs) / len(xs)
-        cy = sum(ys) / len(ys)
-
-        for node in route:
-            if isinstance(node, str):
-                continue
-            data = instance[f'customer_{node}']
-            dx = data['coordinates']['x'] - cx
-            dy = data['coordinates']['y'] - cy
-            total += math.sqrt(dx*dx + dy*dy)
-
-    return total
-
-
-# ================= OVERLAP (SIMPLE) =================
-def overlap_simple(routes, instance):
-    boxes = []
-
-    for route in routes:
-        xs, ys = [], []
-
-        for node in route:
-            if isinstance(node, str):
-                continue
-            data = instance[f'customer_{node}']
-            xs.append(data['coordinates']['x'])
-            ys.append(data['coordinates']['y'])
-
-        if xs:
-            boxes.append((min(xs), max(xs), min(ys), max(ys)))
-
-    count = 0
-    for i in range(len(boxes)):
-        for j in range(i+1, len(boxes)):
-            a = boxes[i]
-            b = boxes[j]
-
-            if (a[0] <= b[1] and a[1] >= b[0] and
-                a[2] <= b[3] and a[3] >= b[2]):
-                count += 1
-
-    return count
-# ================= PLOT ROUTES =================
-def plot_routes(routes, instance, disposal_sites):
-    import matplotlib.pyplot as plt
-
+# ================= VISUAL =================
+def plot_routes_live(routes, instance, disposal_sites, cost=None):
+    plt.clf()
     depot = instance['depart']['coordinates']
 
-    plt.figure(figsize=(8, 8))
+    plt.scatter(depot['x'], depot['y'], marker='s', s=120, color='black', label='Depot')
 
-    # ===== DEPOT =====
-    plt.scatter(depot['x'], depot['y'], marker='s', s=100, label='Depot')
-
-    # ===== DISPOSAL SITES =====
-    # ===== DISPOSAL SITES =====
     first = True
     for ds in disposal_sites:
-        data = instance[f'customer_{ds}']
-        plt.scatter(
-            data['coordinates']['x'],
-            data['coordinates']['y'],
-            marker='x',
-            s=80,
-            color='red',
-            label='Disposal' if first else None
-        )
+        d = instance[f'customer_{ds}']
+        plt.scatter(d['coordinates']['x'], d['coordinates']['y'],
+                    marker='X', s=120, color='red',
+                    label='Disposal' if first else None)
         first = False
 
-    # ===== LEGEND =====
-    plt.legend()
+    for i, r in enumerate(routes):
+        x, y = [depot['x']], [depot['y']]
 
-    # ===== ROUTES =====
-    for idx, route in enumerate(routes):
-        x = [depot['x']]
-        y = [depot['y']]
+        for n in r:
+            if is_lunch(n):
+                continue
 
-        for node in route:
-            if isinstance(node, str):
-                nid = int(node.split('_')[1])
-                data = instance[f'customer_{nid}']
-            else:
-                data = instance[f'customer_{node}']
+            nid = get_id(n)
+            d = instance[f'customer_{nid}']
 
-            x.append(data['coordinates']['x'])
-            y.append(data['coordinates']['y'])
+            x.append(d['coordinates']['x'])
+            y.append(d['coordinates']['y'])
+
+            if is_ds(n):
+                plt.scatter(x[-1], y[-1], color='red', s=150)
 
         x.append(depot['x'])
         y.append(depot['y'])
 
-        plt.plot(x, y, marker='o', label=f'Vehicle {idx+1}')
+        plt.plot(x, y, marker='o', label=f'Vehicle {i+1}')
 
-    plt.title("Vehicle Routes with Disposal Sites")
-    plt.xlabel("X")
-    plt.ylabel("Y")
+    title = "Routing"
+    if cost:
+        title += f" | Cost: {cost:.2f}"
 
+    plt.title(title)
     if len(routes) <= 10:
         plt.legend()
-
     plt.grid()
-    plt.show()
+    plt.pause(0.05)
+
+
+# ================= COST =================
+def route_cost(route, instance, dist, capacity,
+               unit_cost, init_cost, wait_cost, delay_cost,
+               lunch_window, lunch_duration):
+
+    time_now, load, last = 0, 0, 0
+    total_dist, wait, delay = 0, 0, 0
+
+    for n in route:
+
+        if is_lunch(n):
+            if time_now < lunch_window[0]:
+                wait += lunch_window[0] - time_now
+                time_now = lunch_window[0]
+            if time_now > lunch_window[1]:
+                delay += time_now - lunch_window[1]
+            time_now += lunch_duration
+            continue
+
+        nid = get_id(n)
+        d = instance[f'customer_{nid}']
+
+        travel = dist[last][nid]
+        total_dist += travel
+        time_now += travel
+
+        if time_now < d['ready_time']:
+            wait += d['ready_time'] - time_now
+            time_now = d['ready_time']
+
+        if time_now > d['due_time']:
+            delay += time_now - d['due_time']
+
+        if is_ds(n):
+            load = 0
+            service = 30
+        else:
+            load += d['demand']
+            service = d['service_time']
+
+        time_now += service
+        last = nid
+
+    total_dist += dist[last][0]
+
+    return (total_dist * unit_cost +
+            init_cost +
+            wait * wait_cost +
+            delay * delay_cost)
+
+
+def solution_cost(routes, *args):
+    return sum(route_cost(r, *args) for r in routes)
+
 
 # ================= FEASIBLE =================
-def feasible(route, instance, dist, capacity):
+def feasible(route, instance, dist, capacity,
+             lunch_window, lunch_duration):
+
     time_now, load, last = 0, 0, 0
     depot_due = instance['depart']['due_time']
 
-    for node in route:
-        nid = int(node.split('_')[1]) if isinstance(node, str) else node
-        data = instance[f'customer_{nid}']
+    for n in route:
 
-        if isinstance(node, str):
+        if is_lunch(n):
+            if time_now < lunch_window[0]:
+                time_now = lunch_window[0]
+            time_now += lunch_duration
+            continue
+
+        nid = get_id(n)
+        d = instance[f'customer_{nid}']
+
+        if is_ds(n):
             load = 0
         else:
-            load += data['demand']
+            load += d['demand']
             if load > capacity:
                 return False
 
         time_now += dist[last][nid]
-        if time_now > data['due_time']:
+
+        if time_now > d['due_time']:
             return False
 
-        service = 30 if isinstance(node, str) else data['service_time']
-        time_now = max(time_now, data['ready_time']) + service
+        service = 30 if is_ds(n) else d['service_time']
+        time_now = max(time_now, d['ready_time']) + service
         last = nid
 
     time_now += dist[last][0]
     return time_now <= depot_due
 
 
-# ================= SORT =================
+# ================= SORT + CLUSTER =================
 def sort_customers(instance):
     depot = instance['depart']['coordinates']
     nodes = []
@@ -193,127 +166,150 @@ def sort_customers(instance):
     for k in instance:
         if k.startswith('customer_'):
             cid = int(k.split('_')[1])
-            data = instance[k]
+            d = instance[k]
 
             angle = math.atan2(
-                data['coordinates']['y'] - depot['y'],
-                data['coordinates']['x'] - depot['x']
+                d['coordinates']['y'] - depot['y'],
+                d['coordinates']['x'] - depot['x']
             )
-
             nodes.append((cid, angle))
 
     nodes.sort(key=lambda x: x[1])
     return [n[0] for n in nodes]
 
 
-# ================= CLUSTER =================
 def sweep_clustering(customers, instance, capacity):
-    clusters = []
-    current, load = [], 0
+    clusters, cur, load = [], [], 0
 
     for c in customers:
         d = instance[f'customer_{c}']['demand']
+
         if load + d <= capacity:
-            current.append(c)
+            cur.append(c)
             load += d
         else:
-            clusters.append(current)
-            current = [c]
+            clusters.append(cur)
+            cur = [c]
             load = d
 
-    if current:
-        clusters.append(current)
+    if cur:
+        clusters.append(cur)
 
     return clusters
 
 
-# ================= EXTENDED INSERTION =================
-def best_insertion(route, customer, instance, dist, capacity, disposal_sites):
-    best_cost = float('inf')
-    best_route = None
+# ================= DISPOSAL =================
+def best_disposal(prev, next_node, disposal_sites, dist):
+    best, best_cost = None, float('inf')
+
+    for ds in disposal_sites:
+        cost = dist[prev][ds] + dist[ds][next_node]
+        if cost < best_cost:
+            best_cost = cost
+            best = ds
+
+    return best
+
+
+# ================= INSERT =================
+def best_insertion(route, c, instance, dist, capacity,
+                   disposal_sites,
+                   *cost_args):
+
+    best_r, best_c = None, float('inf')
 
     for i in range(len(route)+1):
-        trial = route[:i] + [customer] + route[i:]
-        if feasible(trial, instance, dist, capacity):
-            cost = route_distance(trial, dist)
-            if cost < best_cost:
-                best_cost = cost
-                best_route = trial
 
-        for ds in disposal_sites:
-            trial = route[:i] + [f"DS_{ds}", customer] + route[i:]
-            if feasible(trial, instance, dist, capacity):
-                cost = route_distance(trial, dist)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_route = trial
+        trial = route[:i] + [c] + route[i:]
 
-    return best_route
+        if feasible(trial, instance, dist, capacity,
+                    cost_args[-2], cost_args[-1]):
+
+            cost = route_cost(trial, instance, dist, capacity, *cost_args)
+
+            if cost < best_c:
+                best_r, best_c = trial, cost
+
+        else:
+            prev = 0 if i == 0 else get_id(route[i-1])
+            ds = best_disposal(prev, c, disposal_sites, dist)
+
+            trial = route[:i] + [f"DS_{ds}", c] + route[i:]
+
+            if feasible(trial, instance, dist, capacity,
+                        cost_args[-2], cost_args[-1]):
+
+                cost = route_cost(trial, instance, dist, capacity, *cost_args)
+
+                if cost < best_c:
+                    best_r, best_c = trial, cost
+
+    return best_r
 
 
-def build_routes_cluster(cluster, instance, dist, capacity, disposal_sites):
-    unvisited = cluster[:]
+# ================= BUILD =================
+def build_routes(clusters, instance, dist, capacity,
+                 disposal_sites, *cost_args):
+
     routes = []
 
-    while unvisited:
-        route = [unvisited.pop(0)]
-
-        while True:
-            best_choice = None
-            best_route = None
-            best_cost = float('inf')
-
-            for c in unvisited:
-                new_route = best_insertion(route, c, instance, dist, capacity, disposal_sites)
-                if new_route:
-                    cost = route_distance(new_route, dist)
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_choice = c
-                        best_route = new_route
-
-            if best_choice is None:
-                break
-
-            route = best_route
-            unvisited.remove(best_choice)
-
-        routes.append(route)
-
-    return routes
-
-
-def build_routes(clusters, instance, dist, capacity, disposal_sites):
-    routes = []
     for cluster in clusters:
-        routes += build_routes_cluster(cluster, instance, dist, capacity, disposal_sites)
+        unvisited = cluster[:]
+
+        while unvisited:
+            r = [unvisited.pop(0)]
+
+            while True:
+                best = None
+                best_r = None
+                best_cost = float('inf')
+
+                for c in unvisited:
+                    new_r = best_insertion(
+                        r, c, instance, dist, capacity,
+                        disposal_sites, *cost_args
+                    )
+
+                    if new_r:
+                        cost = route_cost(new_r, instance, dist, capacity, *cost_args)
+                        if cost < best_cost:
+                            best, best_r, best_cost = c, new_r, cost
+
+                if best is None:
+                    break
+
+                r = best_r
+                unvisited.remove(best)
+
+            routes.append(r)
+
     return routes
 
 
-# ================= RELOCATE =================
-def relocate(routes, instance, dist, capacity):
+# ================= LOCAL SEARCH =================
+def relocate(routes, instance, dist, capacity, lw, ld):
     for i in range(len(routes)):
         for j in range(len(routes)):
             if i == j:
                 continue
             for k in range(len(routes[i])):
-                node = routes[i][k]
-                if isinstance(node, str):
+                n = routes[i][k]
+                if isinstance(n, str):
                     continue
 
                 r1 = routes[i][:k] + routes[i][k+1:]
 
                 for pos in range(len(routes[j])+1):
-                    r2 = routes[j][:pos] + [node] + routes[j][pos:]
+                    r2 = routes[j][:pos] + [n] + routes[j][pos:]
 
-                    if feasible(r1, instance, dist, capacity) and feasible(r2, instance, dist, capacity):
+                    if feasible(r1, instance, dist, capacity, lw, ld) and \
+                       feasible(r2, instance, dist, capacity, lw, ld):
                         routes[i], routes[j] = r1, r2
                         return True
     return False
 
 
-# ================= SWAP =================
-def swap(routes, instance, dist, capacity):
+def swap(routes, instance, dist, capacity, lw, ld):
     for i in range(len(routes)):
         for j in range(i+1, len(routes)):
             for a in range(len(routes[i])):
@@ -323,112 +319,113 @@ def swap(routes, instance, dist, capacity):
                     if isinstance(n1, str) or isinstance(n2, str):
                         continue
 
-                    r1 = routes[i][:]
-                    r2 = routes[j][:]
+                    r1, r2 = routes[i][:], routes[j][:]
                     r1[a], r2[b] = n2, n1
 
-                    if feasible(r1, instance, dist, capacity) and feasible(r2, instance, dist, capacity):
+                    if feasible(r1, instance, dist, capacity, lw, ld) and \
+                       feasible(r2, instance, dist, capacity, lw, ld):
                         routes[i], routes[j] = r1, r2
                         return True
     return False
 
 
-# ================= VEHICLE REDUCTION =================
-def vehicle_reduction(routes, instance, dist, capacity):
-    routes = sorted(routes, key=lambda r: route_distance(r, dist))
+def vehicle_reduction(routes, instance, dist, capacity, lw, ld):
+    routes = sorted(routes, key=lambda r: len(r))
 
     for i in range(len(routes)):
         removed = routes[i]
         others = [r[:] for j, r in enumerate(routes) if j != i]
 
-        success = True
-        for node in removed:
-            if isinstance(node, str):
+        ok = True
+        for n in removed:
+            if isinstance(n, str):
                 continue
 
             inserted = False
             for r in others:
                 for pos in range(len(r)+1):
-                    trial = r[:pos] + [node] + r[pos:]
-                    if feasible(trial, instance, dist, capacity):
-                        r.insert(pos, node)
+                    trial = r[:pos] + [n] + r[pos:]
+                    if feasible(trial, instance, dist, capacity, lw, ld):
+                        r.insert(pos, n)
                         inserted = True
                         break
                 if inserted:
                     break
 
             if not inserted:
-                success = False
+                ok = False
                 break
 
-        if success:
+        if ok:
             return others
 
     return routes
 
 
-# ================= RUIN & RECREATE =================
-def ruin_recreate(routes, instance, dist, capacity, disposal_sites):
-    routes_sorted = sorted(routes, key=lambda r: route_distance(r, dist), reverse=True)
-    remove_routes = routes_sorted[:random.randint(1, min(2, len(routes)))]
+# ================= LNS =================
+def ruin_recreate(routes, instance, dist, capacity,
+                  disposal_sites, *cost_args):
 
-    remaining = [r[:] for r in routes if r not in remove_routes]
+    k = random.randint(1, max(1, len(routes)//2))
+    remove_idx = random.sample(range(len(routes)), k)
 
-    unassigned = []
-    for r in remove_routes:
-        for n in r:
-            if not isinstance(n, str):
-                unassigned.append(n)
+    removed, remain = [], []
 
-    for c in unassigned:
-        best_idx = None
-        best_route = None
-        best_cost = float('inf')
-
-        for i, r in enumerate(remaining):
-            new_r = best_insertion(r, c, instance, dist, capacity, disposal_sites)
-            if new_r:
-                cost = route_distance(new_r, dist)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_idx = i
-                    best_route = new_r
-
-        if best_idx is None:
-            remaining.append([c])
+    for i, r in enumerate(routes):
+        if i in remove_idx:
+            removed += [n for n in r if not isinstance(n, str)]
         else:
-            remaining[best_idx] = best_route
+            remain.append(r)
 
-    return remaining
+    random.shuffle(removed)
+
+    for c in removed:
+        best_i, best_r, best_cost = None, None, float('inf')
+
+        for i, r in enumerate(remain):
+            new_r = best_insertion(
+                r, c, instance, dist, capacity,
+                disposal_sites, *cost_args
+            )
+
+            if new_r:
+                cost = route_cost(new_r, instance, dist, capacity, *cost_args)
+                if cost < best_cost:
+                    best_i, best_r, best_cost = i, new_r, cost
+
+        if best_i is None:
+            remain.append([c])
+        else:
+            remain[best_i] = best_r
+
+    return remain
 
 
-# ================= SIMULATED ANNEALING =================
-def simulated_annealing(routes, instance, dist, capacity, disposal_sites):
-    T = 1000
-    cooling = 0.95
+# ================= SA =================
+def simulated_annealing(routes, instance, dist, capacity,
+                        disposal_sites, *cost_args):
 
-    def total_cost(rts):
-        return sum(route_distance(r, dist) for r in rts)
+    T, cooling = 5000, 0.995
 
-    current = copy.deepcopy(routes)
+    cur = copy.deepcopy(routes)
     best = copy.deepcopy(routes)
 
-    current_cost = total_cost(current)
-    best_cost = current_cost
+    cur_cost = solution_cost(cur, instance, dist, capacity, *cost_args)
+    best_cost = cur_cost
 
     while T > 1:
-        new = ruin_recreate(current, instance, dist, capacity, disposal_sites)
-        new_cost = total_cost(new)
+        new = ruin_recreate(cur, instance, dist, capacity,
+                            disposal_sites, *cost_args)
 
-        delta = new_cost - current_cost
+        new_cost = solution_cost(new, instance, dist, capacity, *cost_args)
+        delta = new_cost - cur_cost
 
         if delta < 0 or random.random() < math.exp(-delta / T):
-            current = new
-            current_cost = new_cost
+            cur, cur_cost = new, new_cost
 
-        if current_cost < best_cost:
-            best = copy.deepcopy(current)
-            best_cost = current_cost
+        if cur_cost < best_cost:
+            best, best_cost = copy.deepcopy(cur), cur_cost
+            plot_routes_live(best, instance, disposal_sites, best_cost)
 
         T *= cooling
 
@@ -436,8 +433,8 @@ def simulated_annealing(routes, instance, dist, capacity, disposal_sites):
 
 
 # ================= MAIN =================
-def run_gavrptw(instance_name, disposal_sites, unit_cost, init_cost, wait_cost, delay_cost):
-    _ = unit_cost, init_cost, wait_cost, delay_cost
+def run_gavrptw(instance_name, disposal_sites,
+                unit_cost, init_cost, wait_cost, delay_cost):
 
     start = time.time()
 
@@ -450,58 +447,48 @@ def run_gavrptw(instance_name, disposal_sites, unit_cost, init_cost, wait_cost, 
     dist = instance['distance_matrix']
     capacity = instance['vehicle_capacity']
 
+    lunch_window = (12*3600, 13*3600)
+    lunch_duration = 3600
+
+    cost_args = (
+        unit_cost, init_cost, wait_cost, delay_cost,
+        lunch_window, lunch_duration
+    )
+
+    plt.ion()
+    plt.figure(figsize=(8, 8))
+
     customers = sort_customers(instance)
     clusters = sweep_clustering(customers, instance, capacity)
 
-    routes = build_routes(clusters, instance, dist, capacity, disposal_sites)
+    routes = build_routes(clusters, instance, dist, capacity,
+                          disposal_sites, *cost_args)
 
     for _ in range(20):
-        if not relocate(routes, instance, dist, capacity):
+        if not relocate(routes, instance, dist, capacity, lunch_window, lunch_duration):
             break
 
     for _ in range(20):
-        if not swap(routes, instance, dist, capacity):
+        if not swap(routes, instance, dist, capacity, lunch_window, lunch_duration):
             break
 
     for _ in range(10):
-        routes = vehicle_reduction(routes, instance, dist, capacity)
+        routes = vehicle_reduction(routes, instance, dist, capacity, lunch_window, lunch_duration)
 
-    routes = simulated_annealing(routes, instance, dist, capacity, disposal_sites)
+    routes = simulated_annealing(routes, instance, dist, capacity,
+                                 disposal_sites, *cost_args)
 
-    # ===== OUTPUT ROUTES =====
-    total = 0
-    print("\n" + "="*100)
-    print(f"{'XE':<5} | {'QUÃNG ĐƯỜNG':<12} | TUYẾN")
-    print("-"*100)
+    total = solution_cost(routes, instance, dist, capacity, *cost_args)
 
+    print("\n===== FINAL RESULT =====")
     for i, r in enumerate(routes):
-        d = route_distance(r, dist)
-        total += d
-        print(f"{i+1:<5} | {d:<12.2f} | 0 -> {' -> '.join(map(str,r))} -> 0")
+        print(f"Vehicle {i+1}: 0 -> {' -> '.join(map(str,r))} -> 0")
 
-    print("-"*100)
-    print(f"TỔNG: {len(routes)} xe | Total distance = {total:.2f}")
-    print("="*100)
+    print(f"\nTotal cost: {total:.2f}")
+    print(f"Vehicles: {len(routes)}")
+    print(f"Time: {round(time.time() - start, 2)} s")
 
-    # ===== METRICS =====
-    CT = round(time.time() - start, 2)
-
-    route_times = [route_time(r, instance, dist) for r in routes]
-    RTD = max(route_times) - min(route_times) if route_times else 0
-
-    Sm = shape_metric(routes, instance)
-    Nh = overlap_simple(routes, instance)
-
-    print("\nKẾT QUẢ (Table 3 metrics)")
-    print("-"*100)
-    print(f"Số xe (Vn): {len(routes)}")
-    print(f"Tổng quãng đường (TD): {total:.2f}")
-    print(f"Shape metric (Sm): {Sm:.2f}")
-    print(f"Overlap (Nh): {Nh}")
-    print(f"Route time deviation (RTD): {RTD:.2f}")
-    print(f"Computation time (CT): {CT} s")
-    print("="*100)
-    
-    plot_routes(routes, instance, disposal_sites)
+    plt.ioff()
+    plt.show()
 
     return routes
